@@ -1,0 +1,124 @@
+#!/usr/bin/env ruby
+
+require 'sqlite3'
+require 'optparse'
+require 'find'
+
+module GitIndex
+
+  class << self
+    def run
+      @config = Config::parse_command_line
+
+      index_git_repositories(get_database, find_git_directories)
+    end
+
+    def get_database
+      db = SQLite3::Database.new @config[:database]
+
+      begin
+        db.execute( "select 1 from repositories" ) do |row|
+          break
+        end
+      rescue SQLite3::Exception => e
+        db.execute <<~SQL
+          create table repositories (
+            hash varchar(160),
+            path varchar(250)
+          );
+        SQL
+      end
+
+      db
+    end
+
+    def find_git_directories
+      if @config[:recurse]
+        untrimmed_directories = []
+        ARGV.each do |base_path|
+          Find.find(base_path) do |path|
+            Find.prune if path.include? '.git'
+            Find.prune unless File.directory?(path)
+            Find.prune if system("git -C #{File.join(path,'..')} rev-parse --is-inside-work-tree > /dev/null 2>&1")
+            untrimmed_directories << path
+          end
+        end
+      else
+        untrimmed_directories = ARGV
+      end
+
+      untrimmed_directories.select do |dir|
+        system("git -C #{dir} rev-parse --is-inside-work-tree > /dev/null 2>&1")
+      end
+    end
+
+    def index_git_repositories(db, dirs)
+      dirs.each do |dir|
+        `git -C #{dir} rev-list --parents HEAD | tail -2`.split("\n").each do |hash|
+          db.execute("DELETE FROM repositories where hash = ?", [hash])
+          db.execute("INSERT INTO repositories (hash, path) VALUES (?, ?)", [hash, dir])
+          puts "#{hash} -> #{dir}" if @config[:verbose]
+        end
+      end
+    end
+  end
+
+  module Config
+    class << self
+
+      def parse_command_line
+        config = {
+          :database => "#{ENV['HOME']}/.git-index.db",
+          :recurse => false,
+          :verbose => false
+        }
+
+        options = OptionParser.new do |opts|
+          opts.on( '-h', '--help' ) do
+            puts <<~EHELP
+              git-index [OPTIONS] PATH1 PATH2 PATHn
+
+              -h, --help:
+                Show this help.
+
+              -d [PATH], --database [PATH]:
+                The database file to write to. Defaults to \$HOME/.git-index.db
+
+              -r, --recurse:
+                Recursively search through the provided directories for git repositories.
+
+              -v, --verbose:
+                Provide extra output about actions
+            EHELP
+            exit
+          end
+          opts.on( '-d', '--database' ) do |path|
+            config[:database] = path
+          end
+          opts.on( '-r', '--recurse' ) do
+            config[:recurse] = true
+          end
+          opts.on( '-v', '--verbose' ) do
+            config[:verbose] = true
+          end
+        end
+
+        leftover_argv = []
+        begin
+          options.parse!(ARGV)
+        rescue OptionParser::InvalidOption => e
+          e.recover ARGV
+          leftover_argv << ARGV.shift
+          leftover_argv << ARGV.shift if ARGV.any? && ( ARGV.first[0..0] != '-' )
+          retry
+        end
+
+        ARGV.replace( leftover_argv ) if leftover_argv.any?
+
+        config
+      end
+    end
+  end
+end
+
+GitIndex::run
