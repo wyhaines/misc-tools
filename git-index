@@ -40,7 +40,7 @@ module GitIndex
             Find.prune if path.include? '.git'
             Find.prune unless File.directory?(path)
             Find.prune if system("git -C #{File.join(path,'..')} rev-parse --is-inside-work-tree > /dev/null 2>&1")
-            untrimmed_directories << path
+            untrimmed_directories << File.expand_path( path )
           end
         end
       else
